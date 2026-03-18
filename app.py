@@ -43,6 +43,7 @@ st.markdown("""
     .excel-value { text-align: right; font-weight: bold; color: #1A365D; }
     [data-testid="stSidebar"] { background-color: #1A365D !important; }
     [data-testid="stSidebarNav"] span, [data-testid="stSidebarNav"] div { color: #FFFFFF !important; font-weight: 600; }
+    [data-testid="stSidebar"] label, [data-testid="stSidebar"] .stNumberInput label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span { color: #FFFFFF !important; }
     div[data-testid="stFormSubmitButton"] button { background-color: #800020 !important; color: #FFFFFF !important; border: none !important; font-weight: bold !important; padding: 10px 24px !important; border-radius: 6px !important; }
     div[data-testid="stFormSubmitButton"] button:hover { background-color: #5c0017 !important; color: #FFFFFF !important; }
 </style>
@@ -73,6 +74,8 @@ def fetch_live_certificates():
             cl = c.lower()
             if 'isin' in cl and 'underlying' not in cl: col_mapping[c] = 'ISIN'
             elif ('underlyingname' in cl or 'underlying.name' in cl) and 'short' not in cl: col_mapping[c] = 'Sottostante'
+            elif ('productname' in cl or cl == 'name' or 'product.name' in cl) and 'underlying' not in cl and 'asset' not in cl: col_mapping[c] = 'Nome Certificato'
+            elif 'direction' in cl or ('type' in cl and 'derivative' not in cl and 'asset' not in cl and 'product' not in cl and 'id' not in cl): col_mapping[c] = 'Long/Short'
             elif 'strike' in cl: col_mapping[c] = 'Strike'
             elif 'ratio' in cl or 'multiplier' in cl: col_mapping[c] = 'Multiplo'
             elif cl == 'ask' or cl.endswith('.ask'): col_mapping[c] = 'Lettera'
@@ -84,15 +87,28 @@ def fetch_live_certificates():
         df = df.rename(columns=col_mapping)
         df = df.loc[:, ~df.columns.duplicated()].copy()
         
+        # Ricava Long/Short dal nome del certificato se la colonna dedicata non esiste
+        if 'Long/Short' not in df.columns and 'Nome Certificato' in df.columns:
+            df['Long/Short'] = df['Nome Certificato'].astype(str).apply(
+                lambda x: 'Short' if 'short' in x.lower() else ('Long' if 'long' in x.lower() else 'N/D')
+            )
+        elif 'Long/Short' not in df.columns:
+            # Ultimo tentativo: cerca in tutte le colonne stringa
+            tipo_cols = [c for c in df.columns if df[c].astype(str).str.contains('Short|Long', case=False, na=False).any()]
+            if tipo_cols:
+                src = tipo_cols[0]
+                df['Long/Short'] = df[src].astype(str).apply(
+                    lambda x: 'Short' if 'short' in x.lower() else ('Long' if 'long' in x.lower() else 'N/D')
+                )
+            else:
+                df['Long/Short'] = 'N/D'
+        
         asset_map = {1: 'Azioni', 2: 'Indici', 3: 'Valute', 4: 'Materie prime', 5: 'Tassi di interesse', 11: 'ETF', 14: 'Volatility'}
         if 'Categoria_ID' in df.columns:
             df['Classe'] = pd.to_numeric(df['Categoria_ID'], errors='coerce').map(asset_map).fillna('Altro')
         
         for col in ['Strike', 'Multiplo', 'Lettera', 'Denaro', 'Leva', 'Distanza Barriera %']:
             if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        tipo_cols = [c for c in df.columns if df[c].astype(str).str.contains('Short', case=False, na=False).any()]
-        if tipo_cols: df = df[df[tipo_cols[0]].astype(str).str.contains('Short', case=False, na=False)]
         
         return df.dropna(subset=['Strike', 'Lettera'])
     except Exception:
@@ -308,7 +324,7 @@ with tab3:
         df_f = df_f[(df_f['Leva'] >= min_leva) & (df_f['Leva'] <= max_leva)]
         
         # Colonne visibili nella tabella (le altre restano nel df per la selezione)
-        display_cols = [c for c in ['ISIN', 'Sottostante', 'Denaro', 'Lettera', 'Distanza Barriera %', 'Leva'] if c in df_f.columns]
+        display_cols = [c for c in ['ISIN', 'Nome Certificato', 'Sottostante', 'Denaro', 'Lettera', 'Leva', 'Long/Short'] if c in df_f.columns]
         sel = st.dataframe(df_f[display_cols], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
         if len(sel.selection.rows) > 0:
             row = df_f.iloc[sel.selection.rows[0]]
