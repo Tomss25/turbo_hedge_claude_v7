@@ -119,8 +119,9 @@ if ricerca_libera:
     df_filtered = df_filtered[mask]
 
 # --- TABELLA E INVIO ---
+display_cols = [c for c in ['ISIN', 'Sottostante', 'Denaro', 'Lettera', 'Distanza Barriera %', 'Leva'] if c in df_filtered.columns]
 selection = st.dataframe(
-    df_filtered, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
+    df_filtered[display_cols], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row"
 )
 
 st.divider()
