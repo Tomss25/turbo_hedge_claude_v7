@@ -1,6 +1,7 @@
 import math
+import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # ==============================================================================
 # CHANGELOG v7.0 - FIX CRITICI E MIGLIORAMENTI MODELLO
@@ -11,6 +12,13 @@ from typing import Dict, Any
 # [FIX-9]  Cambio dinamico: supporto cambio_futuro per scenari FX
 # [NEW]    Due hedge ratio: "reale" e "commerciale" (per toggle UI)
 # [NEW]    Metodo dedicato per override manuali (elimina bug app.py riga 134)
+# ==============================================================================
+# CHANGELOG v7.1 - MIGLIORAMENTI MODELLO AVANZATI
+# ==============================================================================
+# [LIM-1]  Monte Carlo: simulazione N percorsi GBM per distribuzione P&L,
+#           VaR e CVaR. La volatilità viene stimata dal premio di mercato.
+# [LIM-2]  Theta decay strutturale: il decay dipende dalla distanza dalla
+#           barriera e dalla volatilità implicita, non solo dal tempo.
 # ==============================================================================
 
 @dataclass
@@ -33,6 +41,8 @@ class TurboParameters:
     stress_slippage: float = 0.0
     # [FIX-9] Cambio futuro per scenari FX (None = usa cambio corrente)
     cambio_futuro: float = None
+    # [LIM-1] Volatilità annualizzata (None = stima implicita dal premio)
+    volatilita: float = None
 
     def __post_init__(self):
         """[FIX-14] Validazione degli input alla costruzione."""
@@ -68,6 +78,51 @@ class DeterministicTurboCalculator:
     def safe_divide(numerator: float, denominator: float) -> float:
         return 0.0 if denominator == 0 else numerator / denominator
 
+    def _estimate_implied_volatility(self, premio: float, T: float) -> float:
+        """
+        [LIM-1] Stima la volatilità implicita dal premio di mercato.
+        Il premio approssima il costo del gap risk, proporzionale a
+        sigma * sqrt(T) * spot * multiplo / cambio.
+        Inversione: sigma = premio / (sqrt(T) * spot * multiplo / cambio).
+        """
+        p = self.p
+        if T <= 0 or premio <= 0:
+            return 0.20
+        denominatore = math.sqrt(T) * p.valore_iniziale * p.multiplo / p.cambio
+        if denominatore <= 0:
+            return 0.20
+        sigma = premio / denominatore
+        return max(0.05, min(1.50, sigma))
+
+    def _theta_decay_structural(self, premio: float, T: float, sigma: float) -> float:
+        """
+        [LIM-2] Theta decay strutturale dipendente da:
+        - Tempo residuo (T): decay accelera vicino a scadenza
+        - Distanza dalla barriera: più vicino = decay più rapido (rischio KO)
+        - Volatilità: alta vol = premio più resiliente (più valore temporale)
+
+        Modello: premio_residuo = premio × sqrt(1-T) × exp(-lambda × T)
+        dove lambda = k / (distanza_relativa × sigma)
+        """
+        p = self.p
+        if p.giorni <= 0 or T >= 1.0:
+            return 0.0
+
+        tasso_netto = 1 - p.euribor + p.spread_emittente
+        barriera = p.strike * math.pow(max(tasso_netto, 0.001), T)
+
+        distanza_rel = (barriera - p.valore_iniziale) / p.valore_iniziale
+        distanza_rel = max(distanza_rel, 0.005)
+
+        sigma_safe = max(sigma, 0.05)
+        lambda_decay = 0.5 / (distanza_rel * sigma_safe)
+        lambda_decay = min(lambda_decay, 10.0)
+
+        sqrt_component = math.sqrt(max(0, 1.0 - T))
+        exp_component = math.exp(-lambda_decay * T)
+
+        return premio * sqrt_component * exp_component
+
     def calculate_all(self) -> Dict[str, Any]:
         p = self.p
         T = self.safe_divide(p.giorni, 360)
@@ -79,6 +134,12 @@ class DeterministicTurboCalculator:
         fair_value = max(0.0, (strike_adj - p.valore_iniziale) * p.multiplo / p.cambio)
         premio = max(0.0, p.prezzo_iniziale - fair_value)
         
+        # --- [LIM-1] Volatilità: usa parametro utente o stima dal premio ---
+        if p.volatilita is not None and p.volatilita > 0:
+            sigma = p.volatilita
+        else:
+            sigma = self._estimate_implied_volatility(premio, T)
+        
         # --- Leva implicita ---
         denominatore_leva = (p.prezzo_iniziale * p.cambio) / p.multiplo if p.multiplo > 0 else 0
         leva = self.safe_divide(p.valore_iniziale, denominatore_leva)
@@ -87,19 +148,12 @@ class DeterministicTurboCalculator:
         tasso_netto = 1 - p.euribor + p.spread_emittente
         barriera = p.strike * math.pow(max(tasso_netto, 0.001), T)
         
-        # --- [FIX-8] Prezzo futuro: usa strike_adj come riferimento, NON barriera ---
-        # La barriera è il livello di knock-out, non il livello di payoff.
-        # Il payoff di un Turbo Short è (strike - spot_target), non (barriera - spot_target).
+        # --- [FIX-8] Prezzo futuro: usa strike_adj come riferimento ---
         valore_intrinseco_futuro = (strike_adj - p.valore_ipotetico) * p.multiplo / p.cambio_futuro
         valore_intrinseco_futuro = max(0.0, valore_intrinseco_futuro)
         
-        # [FIX-5] Premio residuo con decay convesso (radice quadrata del tempo)
-        # Theta decay reale: il premio si erode più rapidamente vicino a scadenza.
-        # sqrt(tempo_residuo/tempo_totale) approssima il comportamento convesso.
-        if p.giorni > 0:
-            premio_residuo = premio * math.sqrt(max(0, 1.0 - T))
-        else:
-            premio_residuo = 0.0
+        # --- [LIM-2] Premio residuo con decay strutturale ---
+        premio_residuo = self._theta_decay_structural(premio, T, sigma)
         
         prezzo_futuro = valore_intrinseco_futuro + premio_residuo
 
@@ -139,6 +193,7 @@ class DeterministicTurboCalculator:
             "fair_value": fair_value,
             "premio": premio,
             "premio_residuo": premio_residuo,
+            "sigma": sigma,
             "leva": leva,
             "barriera": barriera,
             "strike_adj": strike_adj,
@@ -162,8 +217,6 @@ class DeterministicTurboCalculator:
     def override_manual_quantity(self, n_custom: int) -> Dict[str, Any]:
         """
         [FIX-1] Ricalcola con quantità manuale SENZA il bug del capitale.
-        In modalità manuale il capitale è SOLO il costo dei turbo,
-        non portafoglio + costo turbo.
         """
         res = self.calculate_all()
         p = self.p
@@ -174,7 +227,6 @@ class DeterministicTurboCalculator:
         res['n_turbo'] = float(n_custom)
         investimento_lordo = res['n_turbo'] * p.prezzo_iniziale
         res['investimento_lordo'] = investimento_lordo
-        # [FIX-1] Capitale = solo costo turbo (non ptf + costo turbo)
         res['capitale'] = investimento_lordo * (1 + costo_ingresso_pct)
         res['totale_copertura'] = p.portafoglio + res['capitale']
         
@@ -194,3 +246,83 @@ class DeterministicTurboCalculator:
         res['hedge_ratio_commerciale'] = self.safe_divide(res['pl_turbo_lordo'], abs(pl_ptf)) if pl_ptf < 0 else 0.0
         
         return res
+
+    def run_monte_carlo(self, n_sim: int = 5000, seed: int = 42) -> Dict[str, Any]:
+        """
+        [LIM-1] Simulazione Monte Carlo con Geometric Brownian Motion.
+        
+        Genera n_sim percorsi del sottostante su T giorni, per ciascuno calcola:
+        - Se il percorso tocca la barriera (knock-out path-dependent)
+        - Il P&L netto finale del portafoglio coperto
+        
+        Restituisce distribuzione P&L, VaR, CVaR e probabilità di KO.
+        """
+        p = self.p
+        res = self.calculate_all()
+        sigma = res['sigma']
+        T = self.safe_divide(p.giorni, 360)
+        
+        if T <= 0 or p.giorni <= 0:
+            return {
+                "mc_pl_distribution": [],
+                "mc_var_95": 0.0, "mc_cvar_95": 0.0,
+                "mc_prob_ko": 0.0, "mc_pl_mean": 0.0,
+                "mc_pl_median": 0.0, "mc_pl_std": 0.0,
+                "mc_percentiles": {}
+            }
+        
+        rng = np.random.default_rng(seed)
+        dt = T / p.giorni
+        n_turbo = res['n_turbo']
+        barriera = res['barriera']
+        strike_adj = res['strike_adj']
+        
+        costo_uscita_pct = (p.bid_ask_spread / 2) + p.commissioni_pct + p.stress_slippage
+        capitale_investito = res['capitale']
+        
+        mu = p.euribor - p.dividend_yield
+        
+        # Genera percorsi GBM (n_sim × giorni)
+        z = rng.standard_normal((n_sim, p.giorni))
+        log_returns = (mu - 0.5 * sigma**2) * dt + sigma * math.sqrt(dt) * z
+        spot_paths = p.valore_iniziale * np.exp(np.cumsum(log_returns, axis=1))
+        
+        spot_final = spot_paths[:, -1]
+        spot_max = np.max(spot_paths, axis=1)
+        ko_mask = spot_max >= barriera
+        
+        # P&L portafoglio
+        var_idx = (spot_final - p.valore_iniziale) / p.valore_iniziale
+        pl_ptf = p.portafoglio * var_idx * p.beta
+        
+        # P&L turbo
+        valore_intrinseco = np.maximum(0, (strike_adj - spot_final) * p.multiplo / p.cambio_futuro)
+        prezzo_finale = valore_intrinseco + res['premio_residuo']
+        valore_cop_netta = prezzo_finale * n_turbo * (1 - costo_uscita_pct)
+        pl_turbo = valore_cop_netta - capitale_investito
+        pl_turbo = np.where(ko_mask, -capitale_investito, pl_turbo)
+        
+        pl_netto = pl_ptf + pl_turbo
+        
+        var_95 = float(np.percentile(pl_netto, 5))
+        pl_sorted = np.sort(pl_netto)
+        cvar_95 = float(np.mean(pl_sorted[pl_sorted <= var_95])) if np.any(pl_sorted <= var_95) else var_95
+        
+        return {
+            "mc_pl_distribution": pl_netto.tolist(),
+            "mc_var_95": var_95,
+            "mc_cvar_95": cvar_95,
+            "mc_prob_ko": float(np.mean(ko_mask)) * 100,
+            "mc_pl_mean": float(np.mean(pl_netto)),
+            "mc_pl_median": float(np.median(pl_netto)),
+            "mc_pl_std": float(np.std(pl_netto)),
+            "mc_percentiles": {
+                "1%": float(np.percentile(pl_netto, 1)),
+                "5%": float(np.percentile(pl_netto, 5)),
+                "25%": float(np.percentile(pl_netto, 25)),
+                "50%": float(np.percentile(pl_netto, 50)),
+                "75%": float(np.percentile(pl_netto, 75)),
+                "95%": float(np.percentile(pl_netto, 95)),
+                "99%": float(np.percentile(pl_netto, 99)),
+            }
+        }
