@@ -5,3 +5,4 @@ plotly
 yfinance
 fpdf2
 requests
+matplotlib
