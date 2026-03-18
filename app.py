@@ -307,7 +307,9 @@ with tab3:
         if scelta_c != "Tutte": df_f = df_f[df_f['Classe'] == scelta_c]
         df_f = df_f[(df_f['Leva'] >= min_leva) & (df_f['Leva'] <= max_leva)]
         
-        sel = st.dataframe(df_f, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
+        # Colonne visibili nella tabella (le altre restano nel df per la selezione)
+        display_cols = [c for c in ['ISIN', 'Sottostante', 'Denaro', 'Lettera', 'Distanza Barriera %', 'Leva'] if c in df_f.columns]
+        sel = st.dataframe(df_f[display_cols], use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row")
         if len(sel.selection.rows) > 0:
             row = df_f.iloc[sel.selection.rows[0]]
             st.session_state['selected_cert'] = {"isin": row['ISIN'], "strike": row['Strike'], "multiplo": row['Multiplo'], "prezzo": row['Lettera']}
