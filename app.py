@@ -116,21 +116,22 @@ def fetch_live_certificates():
     except Exception:
         return pd.DataFrame()
 
-# --- [LIM-1] FETCH VIX LIVE PER VOLATILITÀ IMPLICITA ---
+# --- [LIM-1] FETCH VOLATILITÀ IMPLICITA (VIX o VSTOXX) ---
 @st.cache_data(ttl=900)
-def fetch_vix_live():
+def fetch_volatility_index(ticker: str = "^VIX"):
     """
-    Scarica il VIX corrente da Yahoo Finance.
-    Il VIX è espresso in punti percentuali (es. 18.5 = 18.5% annualizzato).
-    Restituisce il valore decimale (es. 0.185) o None se non disponibile.
+    Scarica l'indice di volatilità corrente da Yahoo Finance.
+    ^VIX  = CBOE Volatility Index (S&P 500, esposizione US)
+    ^V2X  = VSTOXX (Euro Stoxx 50, esposizione EU)
+    Restituisce il valore decimale (es. 18.5 → 0.185) o None se non disponibile.
     """
     try:
-        vix = yf.download("^VIX", period="5d", progress=False)['Close']
-        if not vix.empty:
-            vix_val = float(vix.iloc[-1])
-            if hasattr(vix_val, '__iter__'):
-                vix_val = float(vix.iloc[-1].iloc[0])
-            return vix_val / 100  # Da punti percentuali a decimale
+        data = yf.download(ticker, period="5d", progress=False)['Close']
+        if not data.empty:
+            val = float(data.iloc[-1])
+            if hasattr(val, '__iter__'):
+                val = float(data.iloc[-1].iloc[0])
+            return val / 100
         return None
     except Exception:
         return None
@@ -173,20 +174,34 @@ with tab1:
             st.markdown("### 💼 Portafoglio")
             ptf = st.number_input("Capitale Ptf (€)", value=200000.0, step=1000.0)
             beta = st.number_input("Beta", value=1.00, step=0.05)
+            esposizione_geo = st.radio("🌍 Esposizione Geografica", ["🇪🇺 Europa (VSTOXX)", "🇺🇸 USA (VIX)"], horizontal=False,
+                                        help="Seleziona il mercato del sottostante per calibrare la volatilità implicita.")
         st.divider()
         tipo_c = st.radio("Ottimizzazione", ["Auto", "Manuale"], horizontal=True)
         n_custom = st.number_input("Qtà", value=1000, step=10) if tipo_c == "Manuale" else None
         
         if st.form_submit_button("🔥 Calcola"):
             try:
-                # [LIM-1] Fetch VIX live come volatilità implicita di mercato
-                vix_sigma = fetch_vix_live()
+                # [LIM-1] Fetch volatilità implicita in base all'esposizione geografica
+                if "Europa" in esposizione_geo:
+                    vol_ticker = "^V2X"
+                    vol_label = "VSTOXX Live"
+                else:
+                    vol_ticker = "^VIX"
+                    vol_label = "VIX Live"
+                
+                vol_sigma = fetch_volatility_index(vol_ticker)
+                # Se il fetch del VSTOXX fallisce, prova il VIX come fallback
+                if vol_sigma is None and vol_ticker == "^V2X":
+                    vol_sigma = fetch_volatility_index("^VIX")
+                    if vol_sigma is not None:
+                        vol_label = "VIX Live (fallback)"
                 
                 params = TurboParameters(
                     p_iniziale, strike, cambio, multiplo, euribor, 
                     v_iniziale, v_ipotetico, giorni, ptf, beta, 
                     dividend_yield=ui_div, bid_ask_spread=ui_spread, commissioni_pct=ui_comm,
-                    volatilita=vix_sigma  # None = fallback a stima dal premio
+                    volatilita=vol_sigma  # None = fallback a stima dal premio
                 )
                 calc = DeterministicTurboCalculator(params)
                 
@@ -203,7 +218,7 @@ with tab1:
                 st.session_state['params'] = params
                 st.session_state['barriera_calcolata'] = res['barriera']
                 st.session_state['mc_res'] = mc_res
-                st.session_state['vix_source'] = "VIX Live" if vix_sigma else "Stima dal Premio"
+                st.session_state['vix_source'] = vol_label if vol_sigma else "Stima dal Premio"
             except ValueError as e:
                 # [FIX-14] Mostra errori di validazione
                 st.error(f"⚠️ Errore nei parametri:\n{e}")
