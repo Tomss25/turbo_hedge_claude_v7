@@ -453,11 +453,19 @@ with tab4:
             df_res = df_l.copy()
             if col_d: df_res = df_res[df_res[col_d] >= v_dist]
             df_res['Diff_Leva'] = (df_res['Leva'] - l_target).abs()
-            matches = df_res.sort_values('Diff_Leva').head(10)
+            matches = df_res.sort_values('Diff_Leva').head(15)
             
             if matches.empty: 
-                st.warning("Nessun certificato sul mercato rispetta questi parametri.")
+                st.warning("Nessun certificato sul mercato rispetta questi parametri. Prova a incrementare il budget o ridurre la distanza dalla barriera.")
             else:
-                st.markdown("##### 🏆 Migliori Soluzioni di Mercato (Ordinati per vicinanza alla Leva Target)")
-                st.dataframe(matches[['Sottostante', 'ISIN', 'Leva', 'Distanza Barriera %', 'Strike', 'Lettera']], use_container_width=True)
-                st.info("👆 Copia l'ISIN desiderato o vai nella tab 'Database Live' per caricarlo nel motore di Setup.")
+                st.markdown("#### 3️⃣ Certificati Compatibili dal Database Live")
+                st.markdown(f"Certificati con distanza barriera ≥ {v_dist:.0f}%, ordinati per vicinanza alla leva target **{l_target:.2f}x**.")
+                
+                # Colonne visibili allineate al Database Live + Diff Leva come indicatore
+                display_cols_adv = [c for c in ['ISIN', 'Nome Certificato', 'Sottostante', 'Denaro', 'Lettera', 'Leva', 'Long/Short'] if c in matches.columns]
+                # Aggiungi colonna di scostamento dalla leva target
+                matches_display = matches[display_cols_adv].copy()
+                matches_display.insert(len(matches_display.columns), 'Δ Leva vs Target', matches['Diff_Leva'].apply(lambda x: f"{x:.2f}"))
+                
+                st.dataframe(matches_display, use_container_width=True, hide_index=True)
+                st.info("👆 Copia l'ISIN desiderato e vai nella tab **Database Live** per caricarlo nel motore di Setup.")
