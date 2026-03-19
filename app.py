@@ -431,39 +431,28 @@ with tab3:
 # ======================================================================
 with tab4:
     st.markdown("### 🤖 Advisor Strategico: Match Portafoglio")
-    st.markdown("Imposta i vincoli di capitale e di budget per estrarre dal mercato i certificati matematicamente ottimali.")
+    st.markdown("Inserisci il livello di leva desiderato per trovare i certificati più compatibili sul mercato.")
     
-    st.markdown("#### 1️⃣ Definisci i Parametri di Hedging")
     with st.form("adv_form"):
-        c1, c2, c3, c4 = st.columns(4)
-        v_p = c1.number_input("Valore Portafoglio (€)", value=200000.0, step=1000.0)
-        v_b = c2.number_input("Beta", value=1.0, step=0.1)
-        v_bud = c3.number_input("Budget Copertura (€)", value=5000.0, step=500.0)
-        v_dist = c4.number_input("Distanza Barriera Min (%)", value=10.0, step=1.0)
-        submit_adv = st.form_submit_button("🔍 Cerca Certificati Ottimali")
+        l_target = st.number_input("🎯 Leva Target", value=40.0, step=1.0, min_value=1.0, help="Livello di leva desiderato per la copertura.")
+        submit_adv = st.form_submit_button("🔍 Cerca Certificati")
         
     if submit_adv:
-        l_target = (v_p * v_b) / v_bud
-        st.markdown("#### 2️⃣ Risultato Ottimizzazione")
-        st.metric(label="🎯 Leva Target Calcolata", value=f"{l_target:.2f}x", help="Rapporto matematico necessario tra capitale da proteggere e budget allocato.")
+        st.metric(label="🎯 Leva Target Ricercata", value=f"{l_target:.2f}x")
         
         df_l = fetch_live_certificates()
         if not df_l.empty:
-            col_d = 'Distanza Barriera %' if 'Distanza Barriera %' in df_l.columns else None
             df_res = df_l.copy()
-            if col_d: df_res = df_res[df_res[col_d] >= v_dist]
             df_res['Diff_Leva'] = (df_res['Leva'] - l_target).abs()
             matches = df_res.sort_values('Diff_Leva').head(15)
             
             if matches.empty: 
-                st.warning("Nessun certificato sul mercato rispetta questi parametri. Prova a incrementare il budget o ridurre la distanza dalla barriera.")
+                st.warning("Nessun certificato trovato.")
             else:
-                st.markdown("#### 3️⃣ Certificati Compatibili dal Database Live")
-                st.markdown(f"Certificati con distanza barriera ≥ {v_dist:.0f}%, ordinati per vicinanza alla leva target **{l_target:.2f}x**.")
+                st.markdown(f"#### Certificati Compatibili dal Database Live")
+                st.markdown(f"Ordinati per vicinanza alla leva target **{l_target:.2f}x**.")
                 
-                # Colonne visibili allineate al Database Live + Diff Leva come indicatore
                 display_cols_adv = [c for c in ['ISIN', 'Nome Certificato', 'Sottostante', 'Denaro', 'Lettera', 'Leva', 'Long/Short'] if c in matches.columns]
-                # Aggiungi colonna di scostamento dalla leva target
                 matches_display = matches[display_cols_adv].copy()
                 matches_display.insert(len(matches_display.columns), 'Δ Leva vs Target', matches['Diff_Leva'].apply(lambda x: f"{x:.2f}"))
                 
