@@ -431,14 +431,18 @@ with tab3:
 # ======================================================================
 with tab4:
     st.markdown("### 🤖 Advisor Strategico: Match Portafoglio")
-    st.markdown("Inserisci il livello di leva desiderato per trovare i certificati più compatibili sul mercato.")
+    st.markdown("Inserisci portafoglio, beta e budget: il sistema calcola la leva target e trova i certificati compatibili.")
     
     with st.form("adv_form"):
-        l_target = st.number_input("🎯 Leva Target", value=40.0, step=1.0, min_value=1.0, help="Livello di leva desiderato per la copertura.")
+        c1, c2, c3 = st.columns(3)
+        v_p = c1.number_input("Valore Portafoglio (€)", value=200000.0, step=1000.0)
+        v_b = c2.number_input("Beta", value=1.0, step=0.1)
+        v_bud = c3.number_input("Budget Copertura (€)", value=5000.0, step=500.0)
         submit_adv = st.form_submit_button("🔍 Cerca Certificati")
         
     if submit_adv:
-        st.metric(label="🎯 Leva Target Ricercata", value=f"{l_target:.2f}x")
+        l_target = (v_p * v_b) / v_bud
+        st.metric(label="🎯 Leva Target Calcolata", value=f"{l_target:.2f}x", help="(Portafoglio × Beta) / Budget")
         
         df_l = fetch_live_certificates()
         if not df_l.empty:
