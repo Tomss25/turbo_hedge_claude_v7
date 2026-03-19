@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import requests
 import datetime
+import yfinance as yf
+import plotly.graph_objects as go
 from calculator import TurboParameters, DeterministicTurboCalculator
 from charts import generate_scenario_data, generate_sensitivity_matrix, plot_payoff_profile, plot_pl_waterfall
 from stress_test import run_stress_test
@@ -114,6 +116,25 @@ def fetch_live_certificates():
     except Exception:
         return pd.DataFrame()
 
+# --- [LIM-1] FETCH VIX LIVE PER VOLATILITÀ IMPLICITA ---
+@st.cache_data(ttl=900)
+def fetch_vix_live():
+    """
+    Scarica il VIX corrente da Yahoo Finance.
+    Il VIX è espresso in punti percentuali (es. 18.5 = 18.5% annualizzato).
+    Restituisce il valore decimale (es. 0.185) o None se non disponibile.
+    """
+    try:
+        vix = yf.download("^VIX", period="5d", progress=False)['Close']
+        if not vix.empty:
+            vix_val = float(vix.iloc[-1])
+            if hasattr(vix_val, '__iter__'):
+                vix_val = float(vix.iloc[-1].iloc[0])
+            return vix_val / 100  # Da punti percentuali a decimale
+        return None
+    except Exception:
+        return None
+
 # --- SIDEBAR ---
 st.sidebar.markdown("<h2 style='color: white;'>📉 Attriti di Mercato</h2>", unsafe_allow_html=True)
 ui_spread = st.sidebar.number_input("Bid-Ask Spread (%)", value=0.5, step=0.1) / 100
@@ -158,10 +179,14 @@ with tab1:
         
         if st.form_submit_button("🔥 Calcola"):
             try:
+                # [LIM-1] Fetch VIX live come volatilità implicita di mercato
+                vix_sigma = fetch_vix_live()
+                
                 params = TurboParameters(
                     p_iniziale, strike, cambio, multiplo, euribor, 
                     v_iniziale, v_ipotetico, giorni, ptf, beta, 
-                    dividend_yield=ui_div, bid_ask_spread=ui_spread, commissioni_pct=ui_comm
+                    dividend_yield=ui_div, bid_ask_spread=ui_spread, commissioni_pct=ui_comm,
+                    volatilita=vix_sigma  # None = fallback a stima dal premio
                 )
                 calc = DeterministicTurboCalculator(params)
                 
@@ -171,9 +196,14 @@ with tab1:
                 else:
                     res = calc.calculate_all()
                 
+                # [LIM-1] Monte Carlo
+                mc_res = calc.run_monte_carlo(n_sim=5000)
+                
                 st.session_state['res'] = res
                 st.session_state['params'] = params
                 st.session_state['barriera_calcolata'] = res['barriera']
+                st.session_state['mc_res'] = mc_res
+                st.session_state['vix_source'] = "VIX Live" if vix_sigma else "Stima dal Premio"
             except ValueError as e:
                 # [FIX-14] Mostra errori di validazione
                 st.error(f"⚠️ Errore nei parametri:\n{e}")
@@ -198,6 +228,7 @@ with tab1:
                 <tr><td class="excel-label">Premio</td><td class="excel-value">{res['premio']:.4f} €</td></tr>
                 <tr><td class="excel-label">Strike</td><td class="excel-value">{params.strike:.2f}</td></tr>
                 <tr><td class="excel-label">Strike Adj (Div)</td><td class="excel-value">{res['strike_adj']:.2f}</td></tr>
+                <tr><td class="excel-label">σ Implicita ({st.session_state.get('vix_source', 'N/D')})</td><td class="excel-value">{res['sigma']*100:.1f}%</td></tr>
             </table>
             """, unsafe_allow_html=True)
 
@@ -259,6 +290,55 @@ with tab1:
         df_s, b_l = generate_scenario_data(params)
         st.plotly_chart(plot_payoff_profile(df_s, params.valore_iniziale, b_l), use_container_width=True)
         st.plotly_chart(plot_pl_waterfall(res), use_container_width=True)
+
+        # --- [LIM-1] SIMULAZIONE MONTE CARLO ---
+        if 'mc_res' in st.session_state:
+            mc = st.session_state['mc_res']
+            if mc['mc_pl_distribution']:
+                st.divider()
+                st.markdown("### 🎲 Simulazione Monte Carlo (5.000 percorsi GBM)")
+                st.markdown(f"Volatilità utilizzata: **{res['sigma']*100:.1f}%** (fonte: {st.session_state.get('vix_source', 'N/D')})")
+                
+                # Metriche di rischio
+                mc1, mc2, mc3, mc4 = st.columns(4)
+                mc1.metric("VaR 95%", f"€ {mc['mc_var_95']:,.0f}", help="Perdita massima nel 95% dei casi")
+                mc2.metric("CVaR 95%", f"€ {mc['mc_cvar_95']:,.0f}", help="Perdita media nel peggior 5% dei casi")
+                mc3.metric("Prob. Knock-Out", f"{mc['mc_prob_ko']:.1f}%", help="Probabilità che il sottostante tocchi la barriera")
+                mc4.metric("P&L Medio", f"€ {mc['mc_pl_mean']:,.0f}")
+                
+                # Istogramma distribuzione P&L
+                pl_arr = np.array(mc['mc_pl_distribution'])
+                fig_mc = go.Figure()
+                fig_mc.add_trace(go.Histogram(
+                    x=pl_arr, nbinsx=80, name="Distribuzione P&L",
+                    marker_color="#2c5282", opacity=0.85
+                ))
+                # Linee VaR e CVaR
+                fig_mc.add_vline(x=mc['mc_var_95'], line_dash="dash", line_color="#C62828", 
+                                 annotation_text=f"VaR 95%: € {mc['mc_var_95']:,.0f}", annotation_position="top left")
+                fig_mc.add_vline(x=mc['mc_cvar_95'], line_dash="dot", line_color="#E65100",
+                                 annotation_text=f"CVaR 95%: € {mc['mc_cvar_95']:,.0f}", annotation_position="top left")
+                fig_mc.add_vline(x=0, line_color="black", line_width=1)
+                # Linea scenario deterministico
+                pl_det = res['pl_portafoglio'] + res['pl_turbo_netto']
+                fig_mc.add_vline(x=pl_det, line_dash="dash", line_color="#2E7D32",
+                                 annotation_text=f"Deterministico: € {pl_det:,.0f}", annotation_position="top right")
+                fig_mc.update_layout(
+                    title="Distribuzione P&L Netto (Monte Carlo vs Deterministico)",
+                    xaxis_title="P&L Netto (€)", yaxis_title="Frequenza",
+                    template='plotly_white', height=400, showlegend=False,
+                    margin=dict(l=20, r=20, t=50, b=20)
+                )
+                st.plotly_chart(fig_mc, use_container_width=True)
+                
+                # Tabella percentili
+                st.markdown("##### Distribuzione per Percentili")
+                perc = mc['mc_percentiles']
+                df_perc = pd.DataFrame({
+                    'Percentile': list(perc.keys()),
+                    'P&L (€)': [f"€ {v:,.0f}" for v in perc.values()]
+                })
+                st.dataframe(df_perc, use_container_width=True, hide_index=True)
 
 # ======================================================================
 # TAB 2: BACKTEST
