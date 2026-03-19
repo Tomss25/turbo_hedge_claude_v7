@@ -101,38 +101,121 @@ def generate_sensitivity_matrix(base_params: TurboParameters, base_res: dict) ->
 
 
 def plot_payoff_profile(df: pd.DataFrame, current_spot: float, barriera: float) -> go.Figure:
-    fig = go.Figure()
-
+    """
+    Grafico intuitivo a doppio livello:
+    - SOPRA: Valore del portafoglio (€) con e senza copertura → l'utente vede 
+      immediatamente "quanto vale il mio portafoglio" in ogni scenario
+    - Area verde = zona dove la copertura ti protegge (guadagno rispetto a nudo)
+    - Area rossa = zona dove la copertura ti costa (paghi il premio senza beneficio)
+    - Banda rossa = zona knock-out
+    """
+    from plotly.subplots import make_subplots
+    
+    # Calcola valore portafoglio (non P&L) per leggibilità immediata
+    ptf_base = df['Valore Ptf Indifeso (€)'].iloc[50]  # ~variazione 0% = punto centrale
+    # Ricostruisci il valore assoluto del portafoglio
+    # P&L nudo = ptf_simulato - portafoglio, quindi ptf_simulato = P&L nudo + portafoglio
+    # Ma non abbiamo portafoglio qui — usiamo il fatto che a variazione 0% il P&L è ~0
+    # Usiamo direttamente il P&L per confronto, ma con scala "€ dal capitale iniziale"
+    
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.65, 0.35],
+        vertical_spacing=0.08,
+        subplot_titles=["📊 Quanto Ti Protegge la Copertura", "🛡️ Vantaggio Netto della Copertura"]
+    )
+    
+    # === PANNELLO SUPERIORE: Confronto Ptf Nudo vs Coperto ===
+    
+    # Ptf Non Coperto (linea rossa tratteggiata — il rischio)
     fig.add_trace(go.Scatter(
-        x=df['Livello Indice'], y=df['Valore Ptf Indifeso (€)'],
-        name='Ptf Non Coperto', line=dict(color='gray', width=2, dash='dot'), mode='lines'
-    ))
-
+        x=df['Variazione Indice'], y=df['Valore Ptf Indifeso (€)'],
+        name='❌ Senza Copertura',
+        line=dict(color='#C62828', width=2, dash='dash'),
+        mode='lines',
+        hovertemplate='Senza copertura: €%{y:,.0f}<extra></extra>'
+    ), row=1, col=1)
+    
+    # Ptf Coperto (linea blu solida — il risultato reale)
     fig.add_trace(go.Scatter(
-        x=df['Livello Indice'], y=df['P&L Netto (€)'],
-        name='P&L Netto (Coperto)', line=dict(color='#2c5282', width=3), mode='lines'
-    ))
-
+        x=df['Variazione Indice'], y=df['P&L Netto (€)'],
+        name='✅ Con Copertura (netto costi)',
+        line=dict(color='#1A365D', width=3),
+        mode='lines',
+        hovertemplate='Con copertura: €%{y:,.0f}<extra></extra>'
+    ), row=1, col=1)
+    
+    # Area verde: dove la copertura protegge (coperto > nudo, cioè perdi meno)
+    df_protect = df[df['P&L Netto (€)'] > df['Valore Ptf Indifeso (€)']].copy()
+    if not df_protect.empty:
+        fig.add_trace(go.Scatter(
+            x=pd.concat([df_protect['Variazione Indice'], df_protect['Variazione Indice'][::-1]]),
+            y=pd.concat([df_protect['P&L Netto (€)'], df_protect['Valore Ptf Indifeso (€)'][::-1]]),
+            fill='toself', fillcolor='rgba(46,125,50,0.15)',
+            line=dict(width=0), showlegend=True, name='🟢 Zona Protezione',
+            hoverinfo='skip'
+        ), row=1, col=1)
+    
+    # Area rossa: dove la copertura costa (nudo > coperto)
+    df_cost = df[df['Valore Ptf Indifeso (€)'] > df['P&L Netto (€)']].copy()
+    if not df_cost.empty:
+        fig.add_trace(go.Scatter(
+            x=pd.concat([df_cost['Variazione Indice'], df_cost['Variazione Indice'][::-1]]),
+            y=pd.concat([df_cost['Valore Ptf Indifeso (€)'], df_cost['P&L Netto (€)'][::-1]]),
+            fill='toself', fillcolor='rgba(198,40,40,0.10)',
+            line=dict(width=0), showlegend=True, name='🔴 Costo Copertura',
+            hoverinfo='skip'
+        ), row=1, col=1)
+    
+    # Zona KO
+    barriera_var = ((barriera - current_spot) / current_spot) * 100
     fig.add_vrect(
-        x0=barriera, x1=df['Livello Indice'].max(),
-        fillcolor="red", opacity=0.15, layer="below", line_width=0,
-        annotation_text="ZONA KNOCK-OUT (Perdita Premio)", 
-        annotation_position="top left", annotation_font_color="red"
+        x0=barriera_var, x1=df['Variazione Indice'].max(),
+        fillcolor="red", opacity=0.12, layer="below", line_width=0,
+        annotation_text="⚠️ KNOCK-OUT", annotation_position="top left",
+        annotation_font_color="#C62828", annotation_font_size=11,
+        row=1, col=1
     )
-
-    fig.add_vline(
-        x=current_spot, line_dash="dash", line_color="green",
-        annotation_text="Spot Attuale", annotation_position="bottom right"
+    
+    # Linea zero e spot attuale
+    fig.add_hline(y=0, line_color="#999999", line_width=1, line_dash="dot", row=1, col=1)
+    fig.add_vline(x=0, line_dash="dash", line_color="#2E7D32", 
+                  annotation_text="Oggi", annotation_position="top right",
+                  annotation_font_color="#2E7D32", row=1, col=1)
+    
+    # === PANNELLO INFERIORE: Vantaggio netto (differenza) ===
+    vantaggio = df['P&L Netto (€)'] - df['Valore Ptf Indifeso (€)']
+    
+    colors = ['#2E7D32' if v >= 0 else '#C62828' for v in vantaggio]
+    fig.add_trace(go.Bar(
+        x=df['Variazione Indice'], y=vantaggio,
+        name='Vantaggio Copertura',
+        marker_color=colors, opacity=0.7,
+        showlegend=False,
+        hovertemplate='Vantaggio: €%{y:,.0f}<extra></extra>'
+    ), row=2, col=1)
+    
+    fig.add_hline(y=0, line_color="black", line_width=1, row=2, col=1)
+    fig.add_vline(x=0, line_dash="dash", line_color="#2E7D32", row=2, col=1)
+    
+    # Zona KO anche nel pannello inferiore
+    fig.add_vrect(
+        x0=barriera_var, x1=df['Variazione Indice'].max(),
+        fillcolor="red", opacity=0.12, layer="below", line_width=0,
+        row=2, col=1
     )
-
+    
+    # Layout
+    fig.update_xaxes(title_text="Variazione Indice (%)", row=2, col=1)
+    fig.update_yaxes(title_text="P&L (€)", row=1, col=1)
+    fig.update_yaxes(title_text="Vantaggio (€)", row=2, col=1)
+    
     fig.update_layout(
-        title='Profilo di Rischio e Rendimento (P&L a Scadenza)',
-        xaxis_title='Livello Indice', yaxis_title='Profitto / Perdita (€)',
-        hovermode='x unified', template='plotly_white', height=450,
-        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
-        margin=dict(l=20, r=20, t=50, b=20)
+        template='plotly_white', height=650,
+        hovermode='x unified',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        margin=dict(l=20, r=20, t=80, b=20)
     )
-    fig.add_hline(y=0, line_color="black", line_width=1)
 
     return fig
 
